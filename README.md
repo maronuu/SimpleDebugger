@@ -25,4 +25,4 @@ gcc -no-pie test_add.c -o test_add
 ./debugger test_add add
 ```
 
-At every breakpoint (i.e., given symbol name), debugger displays the current register state. To proceed, press the Enter key.
+At every breakpoint (i.e., given symbol name), the debugger displays the current register state. To proceed, press the Enter key.
