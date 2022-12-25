@@ -42,39 +42,41 @@
 //     unsigned long long int gs;
 // };
 
+typedef struct ElfHandler {
+    Elf64_Ehdr *ehdr;             // ELF header
+    Elf64_Phdr *phdr;             // program header
+    Elf64_Shdr *shdr;             // section header
+    uint8_t *mem;                 // memory map of the executable
+    char *exec_cmd;               // exec command
+    char *symbol_name;            // symbol name to be traced
+    Elf64_Addr symbol_addr;       // symbol address
+    struct user_regs_struct regs; // registers
+} ElfHandler_t;
 
-typedef struct handle {
-    Elf64_Ehdr *ehdr;
-    Elf64_Phdr *phdr;
-    Elf64_Shdr *shdr;
-    uint8_t *mem;
-    char *symbol_name;
-    Elf64_Addr symbol_addr;
-    struct user_regs_struct regs;
-    char *exec;
-} handle_t;
-
-Elf64_Addr lookup_by_symbol(handle_t *, const char *);
+Elf64_Addr lookup_symbol_addr_by_name(ElfHandler_t *, const char *);
+void display_registers(const ElfHandler_t *);
 
 int main(int argc, char **argv, char **envp) {
+    // parse command line arguments
     if (argc < 3) {
         printf("Usage: %s <program> <function>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-
-    handle_t h;
-    memset(&h, 0, sizeof(handle_t));
-    if ((h.exec = strdup(argv[1])) == NULL) {
+    ElfHandler_t eh;
+    memset(&eh, 0, sizeof(ElfHandler_t));
+    if ((eh.exec_cmd = strdup(argv[1])) == NULL) {
         perror("strdup");
         exit(EXIT_FAILURE);
     }
     char *args[2];
-    args[0] = h.exec;
+    args[0] = eh.exec_cmd;
     args[1] = NULL;
-    if ((h.symbol_name = strdup(argv[2])) == NULL) {
+    if ((eh.symbol_name = strdup(argv[2])) == NULL) {
         perror("strdup");
         exit(EXIT_FAILURE);
     }
+
+    // read and dump elf file
     int fd;
     if ((fd = open(argv[1], O_RDONLY)) < 0) {
         perror("open");
@@ -85,32 +87,35 @@ int main(int argc, char **argv, char **envp) {
         perror("fstat");
         exit(EXIT_FAILURE);
     }
-    if ((h.mem = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED) {
+    if ((eh.mem = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED) {
         perror("mmap");
         exit(EXIT_FAILURE);
     }
     // split the mem into ehdr, phdr, shdr
-    h.ehdr = (Elf64_Ehdr *)h.mem;
-    h.phdr = (Elf64_Phdr *)(h.mem + h.ehdr->e_phoff);
-    h.shdr = (Elf64_Shdr *)(h.mem + h.ehdr->e_shoff);
-    
-    if (h.mem[0] != 0x7f && !strcmp((char *)&h.mem[1], "ELF")) {
+    eh.ehdr = (Elf64_Ehdr *)eh.mem;
+    eh.phdr = (Elf64_Phdr *)(eh.mem + eh.ehdr->e_phoff);
+    eh.shdr = (Elf64_Shdr *)(eh.mem + eh.ehdr->e_shoff);
+
+    // validate the elf file
+    if (eh.mem[0] != 0x7f && !strcmp((char *)&eh.mem[1], "ELF")) {
         printf("Not an ELF file\n");
         exit(EXIT_FAILURE);
     }
-    if (h.ehdr->e_type != ET_EXEC) {
-      printf("%s is not an ELF executable\n", h.exec);
-      exit(-1);
+    if (eh.ehdr->e_type != ET_EXEC) {
+        printf("%s is not an ELF executable\n", eh.exec_cmd);
+        exit(-1);
     }
-    if (h.ehdr->e_machine != EM_X86_64) {
+    if (eh.ehdr->e_machine != EM_X86_64) {
         printf("Not an x86_64 executable\n");
         exit(EXIT_FAILURE);
     }
-    if (h.ehdr->e_shstrndx == 0 || h.ehdr->e_shoff == 0 || h.ehdr->e_shnum == 0) {
+    if (eh.ehdr->e_shstrndx == 0 || eh.ehdr->e_shoff == 0 || eh.ehdr->e_shnum == 0) {
         printf("No section header\n");
         exit(EXIT_FAILURE);
     }
-    if ((h.symbol_addr = lookup_by_symbol(&h, h.symbol_name)) == 0) {
+
+    // lookup the symbol
+    if ((eh.symbol_addr = lookup_symbol_addr_by_name(&eh, eh.symbol_name)) == 0) {
         printf("Symbol not found\n");
         exit(EXIT_FAILURE);
     }
@@ -122,12 +127,13 @@ int main(int argc, char **argv, char **envp) {
         perror("fork");
         exit(EXIT_FAILURE);
     }
+    // parent executes the given program
     if (pid == 0) {
         if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
             perror("ptrace");
             exit(EXIT_FAILURE);
         }
-        if (execve(h.exec, args, envp) < 0) {
+        if (execve(eh.exec_cmd, args, envp) < 0) {
             perror("execve");
             exit(EXIT_FAILURE);
         }
@@ -136,14 +142,15 @@ int main(int argc, char **argv, char **envp) {
     int status;
     wait(&status);
 
-    printf("Tracing pid %d at %lx\n", pid, h.symbol_addr);
-    
+    // beginning of tracing
+    printf("Tracing pid %d at %lx\n", pid, eh.symbol_addr);
+
     long trap, orig;
     // get original instruction
-    orig = ptrace(PTRACE_PEEKTEXT, pid, h.symbol_addr, NULL);
+    orig = ptrace(PTRACE_PEEKTEXT, pid, eh.symbol_addr, NULL);
     // modify to trap instruction
     trap = (orig & ~0xff) | 0xcc;
-    ptrace(PTRACE_POKETEXT, pid, h.symbol_addr, trap);
+    ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap);
 
     while (1) {
         // resume process execution
@@ -152,48 +159,25 @@ int main(int argc, char **argv, char **envp) {
             exit(EXIT_FAILURE);
         }
         wait(&status);
-        
+
         if (WIFEXITED(status)) {
             break;
         }
         if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
-            if (ptrace(PTRACE_GETREGS, pid, NULL, &h.regs) < 0) {
+            if (ptrace(PTRACE_GETREGS, pid, NULL, &eh.regs) < 0) {
                 perror("PTRACE_GETREGS");
                 exit(EXIT_FAILURE);
             }
-            printf("\n");
-            printf("%%rax: %llx\n", h.regs.rax);
-            printf("%%rbx: %llx\n", h.regs.rbx);
-            printf("%%rcx: %llx\n", h.regs.rcx);
-            printf("%%rdx: %llx\n", h.regs.rdx);
-            printf("%%rsi: %llx\n", h.regs.rsi);
-            printf("%%rdi: %llx\n", h.regs.rdi);
-            printf("%%rbp: %llx\n", h.regs.rbp);
-            printf("%%rsp: %llx\n", h.regs.rsp);
-            printf("%%r8: %llx\n", h.regs.r8);
-            printf("%%r9: %llx\n", h.regs.r9);
-            printf("%%r10: %llx\n", h.regs.r10);
-            printf("%%r11: %llx\n", h.regs.r11);
-            printf("%%r12: %llx\n", h.regs.r12);
-            printf("%%r13: %llx\n", h.regs.r13);
-            printf("%%r14: %llx\n", h.regs.r14);
-            printf("%%r15: %llx\n", h.regs.r15);
-            printf("%%rip: %llx\n", h.regs.rip);
-            printf("%%rflags: %llx\n", h.regs.eflags);
-            printf("%%cs: %llx\n", h.regs.cs);
-            printf("%%ss: %llx\n", h.regs.ss);
-            printf("%%ds: %llx\n", h.regs.ds);
-            printf("%%es: %llx\n", h.regs.es);
-            printf("%%fs: %llx\n", h.regs.fs);
-            printf("%%gs: %llx\n", h.regs.gs);
+            display_registers(&eh);
+
             printf("\nPlease hit any key to continue: ");
             getchar();
-            if (ptrace(PTRACE_POKETEXT, pid, h.symbol_addr, orig) < 0) {
+            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, orig) < 0) {
                 perror("PTRACE_POKETEXT");
                 exit(EXIT_FAILURE);
             }
-            h.regs.rip -= 1;
-            if (ptrace(PTRACE_SETREGS, pid, NULL, &h.regs) < 0) {
+            eh.regs.rip -= 1;
+            if (ptrace(PTRACE_SETREGS, pid, NULL, &eh.regs) < 0) {
                 perror("PTRACE_SETREGS");
                 exit(EXIT_FAILURE);
             }
@@ -202,7 +186,7 @@ int main(int argc, char **argv, char **envp) {
                 exit(EXIT_FAILURE);
             }
             wait(NULL);
-            if (ptrace(PTRACE_POKETEXT, pid, h.symbol_addr, trap) < 0) {
+            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap) < 0) {
                 perror("PTRACE_POKETEXT");
                 exit(EXIT_FAILURE);
             }
@@ -214,19 +198,61 @@ int main(int argc, char **argv, char **envp) {
     }
 }
 
-Elf64_Addr lookup_by_symbol(handle_t *h, const char *symname) {
-  int i, j;
-  char *strtab;
-  Elf64_Sym *symtab;
-  for (i = 0; i < h->ehdr->e_shnum; i++) {
-    if (h->shdr[i].sh_type == SHT_SYMTAB) {
-      strtab = (char *)&h->mem[h->shdr[h->shdr[i].sh_link].sh_offset];
-      symtab = (Elf64_Sym *)&h->mem[h->shdr[i].sh_offset];
-      for (j = 0; j < h->shdr[i].sh_size / sizeof(Elf64_Sym); j++, symtab++) {
-        if (strcmp(&strtab[symtab->st_name], symname) == 0)
-          return (symtab->st_value);
-      }
+Elf64_Addr lookup_symbol_addr_by_name(ElfHandler_t *eh, const char *target_symname) {
+    char *str_tbl;
+    Elf64_Sym *sym_tbl;
+    Elf64_Shdr *cand_shdr;
+    uint32_t link_to_str_tbl;
+    char *cand_symname;
+
+    // iterate through the section headers
+    for (int i = 0; i < eh->ehdr->e_shnum; i++) {
+        if (eh->shdr[i].sh_type != SHT_SYMTAB)
+            continue;
+
+        cand_shdr = &eh->shdr[i];
+        // get the symbol table
+        sym_tbl = (Elf64_Sym *)&eh->mem[cand_shdr->sh_offset];
+        // get the string table
+        link_to_str_tbl = cand_shdr->sh_link;
+        str_tbl = (char *)&eh->mem[eh->shdr[link_to_str_tbl].sh_offset];
+
+        // iterate through the symbol table
+        for (int j = 0; j < eh->shdr[i].sh_size / sizeof(Elf64_Sym); j++, sym_tbl++) {
+            // check if the symbol name matches
+            cand_symname = &str_tbl[sym_tbl->st_name];
+            if (strcmp(cand_symname, target_symname) == 0) {
+                return (sym_tbl->st_value);
+            }
+        }
     }
-  }
-  return 0;
+    return 0;
+}
+
+void display_registers(const ElfHandler_t *eh) {
+    printf("\n");
+    printf("%%rax: %llx\n", eh->regs.rax);
+    printf("%%rbx: %llx\n", eh->regs.rbx);
+    printf("%%rcx: %llx\n", eh->regs.rcx);
+    printf("%%rdx: %llx\n", eh->regs.rdx);
+    printf("%%rsi: %llx\n", eh->regs.rsi);
+    printf("%%rdi: %llx\n", eh->regs.rdi);
+    printf("%%rbp: %llx\n", eh->regs.rbp);
+    printf("%%rsp: %llx\n", eh->regs.rsp);
+    printf("%%r8: %llx\n", eh->regs.r8);
+    printf("%%r9: %llx\n", eh->regs.r9);
+    printf("%%r10: %llx\n", eh->regs.r10);
+    printf("%%r11: %llx\n", eh->regs.r11);
+    printf("%%r12: %llx\n", eh->regs.r12);
+    printf("%%r13: %llx\n", eh->regs.r13);
+    printf("%%r14: %llx\n", eh->regs.r14);
+    printf("%%r15: %llx\n", eh->regs.r15);
+    printf("%%rip: %llx\n", eh->regs.rip);
+    printf("%%rflags: %llx\n", eh->regs.eflags);
+    printf("%%cs: %llx\n", eh->regs.cs);
+    printf("%%ss: %llx\n", eh->regs.ss);
+    printf("%%ds: %llx\n", eh->regs.ds);
+    printf("%%es: %llx\n", eh->regs.es);
+    printf("%%fs: %llx\n", eh->regs.fs);
+    printf("%%gs: %llx\n", eh->regs.gs);
 }
