@@ -5,10 +5,9 @@ int add (int a, int b, int c) {
 }
 
 int main(int argc, char **argv, char **envp) {
-    int a, b, c;
-    a = 1;
-    b = 2;
-    c = 9;
+    int a = 1;
+    int b = 2;
+    int c = 9;
     printf("a = %d, b = %d, c = %d\n", a, b, c);
 
     int d = add(a, b, 23); // 1(1) + 2(2) + 23(17) = 26(1a)

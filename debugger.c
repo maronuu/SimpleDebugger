@@ -10,7 +10,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#define OPCODE_INT3 0xcc
 
 // struct user_regs_struct {
 //     unsigned long long int r15;
@@ -127,7 +130,7 @@ int main(int argc, char **argv, char **envp) {
         perror("fork");
         exit(EXIT_FAILURE);
     }
-    // parent executes the given program
+    // child executes the given program
     if (pid == 0) {
         if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
             perror("ptrace");
@@ -143,14 +146,13 @@ int main(int argc, char **argv, char **envp) {
     wait(&status);
 
     // beginning of tracing
-    printf("Tracing pid %d at %lx\n", pid, eh.symbol_addr);
+    printf("Tracing pid:%d at symbol addr %lx\n", pid, eh.symbol_addr);
 
-    long trap, orig;
     // get original instruction
-    orig = ptrace(PTRACE_PEEKTEXT, pid, eh.symbol_addr, NULL);
+    const long original_inst = ptrace(PTRACE_PEEKTEXT, pid, eh.symbol_addr, NULL);
     // modify to trap instruction
-    trap = (orig & ~0xff) | 0xcc;
-    ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap);
+    const long trap_inst = (original_inst & ~0xff) | OPCODE_INT3;
+    ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap_inst);
 
     while (1) {
         // resume process execution
@@ -164,18 +166,20 @@ int main(int argc, char **argv, char **envp) {
             break;
         }
         if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
+            // get registers info and display them
             if (ptrace(PTRACE_GETREGS, pid, NULL, &eh.regs) < 0) {
                 perror("PTRACE_GETREGS");
                 exit(EXIT_FAILURE);
             }
             display_registers(&eh);
-
-            printf("\nPlease hit any key to continue: ");
+            printf("\nPlease hit [ENTER] key to continue: ");
             getchar();
-            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, orig) < 0) {
+            // restore original instruction
+            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, original_inst) < 0) {
                 perror("PTRACE_POKETEXT");
                 exit(EXIT_FAILURE);
             }
+            // single step to execute the original instruction
             eh.regs.rip -= 1;
             if (ptrace(PTRACE_SETREGS, pid, NULL, &eh.regs) < 0) {
                 perror("PTRACE_SETREGS");
@@ -186,7 +190,8 @@ int main(int argc, char **argv, char **envp) {
                 exit(EXIT_FAILURE);
             }
             wait(NULL);
-            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap) < 0) {
+            // restore trap instruction
+            if (ptrace(PTRACE_POKETEXT, pid, eh.symbol_addr, trap_inst) < 0) {
                 perror("PTRACE_POKETEXT");
                 exit(EXIT_FAILURE);
             }
@@ -194,8 +199,8 @@ int main(int argc, char **argv, char **envp) {
     }
     if (WIFEXITED(status)) {
         printf("Completed tracing pid: %d\n", pid);
-        exit(EXIT_SUCCESS);
     }
+    exit(EXIT_SUCCESS);
 }
 
 Elf64_Addr lookup_symbol_addr_by_name(ElfHandler_t *eh, const char *target_symname) {
