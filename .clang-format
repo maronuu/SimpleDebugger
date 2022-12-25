@@ -1,1 +1,6 @@
-BasedOnStyle: Google
+BasedOnStyle: LLVM
+IndentWidth: 4
+Standard: Auto
+ColumnLimit: 120
+UseCRLF: false
+# AccessModifierOffset: -4
