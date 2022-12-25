@@ -19,7 +19,7 @@ gcc -no-pie test_add.c -o test_add
 ```
 ### Run debugger
 ```bash
-// ./debugger <ELF executable> <symbol name>
+# ./debugger <ELF executable> <symbol name>
 ./debugger test_print print_string
 
 ./debugger test_add add
